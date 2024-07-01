@@ -11,6 +11,9 @@ const {
 const { db } = require("../../index.js");
 const interests = require("../../tags.json");
 
+const activeRequests = new Set();
+const cooldowns = new Map();
+
 module.exports = {
   /**
    *
@@ -18,6 +21,20 @@ module.exports = {
    * @param {Interaction} interaction
    */
   callback: async (client, interaction) => {
+    // Implement cooldown
+    const cooldownTime = 5 * 60 * 1000; // 5 minutes in milliseconds
+    const now = Date.now();
+    const cooldownEnd = cooldowns.get(interaction.user.id) || 0;
+
+    if (now < cooldownEnd) {
+      const remainingTime = Math.ceil((cooldownEnd - now) / 1000);
+      await interaction.reply({
+        content: `Please wait ${remainingTime} seconds before using this command again.`,
+        ephemeral: true,
+      });
+      return;
+    }
+
     const discordUsersRef = db.ref("discord-users");
     const targetInterestId = interaction.options.getString("interest");
     const additionalDetails = interaction.options.getString("additional");
@@ -42,15 +59,54 @@ module.exports = {
     const snapshot = await discordUsersRef.once("value");
     const users = snapshot.val() || {};
 
-    const matchingUsers = Object.keys(users).filter((userId) => {
-      const user = users[userId];
-      return (
-        userId !== requesterId &&
-        user.status === "enabled" &&
-        user.tags &&
-        user.tags[interest.name]
-      );
+    const matchingUsers = Object.keys(users)
+      .filter((userId) => {
+        const user = users[userId];
+        const conditions = {
+          notRequester: userId !== requesterId,
+          enabled: user.status === "enabled",
+          hasTags: !!user.tags,
+          hasInterestTag: user.tags && user.tags[interest.name],
+        };
+        return Object.values(conditions).every(Boolean);
+      })
+      .slice(0, 100);
+
+    const activeUsersCount = matchingUsers.length;
+    const sentRequestsCount = matchingUsers.length;
+
+    if (matchingUsers.length === 0) {
+      await interaction.editReply({
+        content: "No users with matching tags found.",
+        ephemeral: true,
+      });
+      return;
+    }
+
+    // Create and send the initial embed
+    const requestEmbed = new EmbedBuilder()
+      .setTitle("Interest Request Sent")
+      .setDescription(
+        `Your request for interest: ${interest.name} has been sent.`
+      )
+      .addFields(
+        { name: "Interest", value: interest.name },
+        { name: "Additional Details", value: additionalDetails },
+        { name: "Active Users with Tag", value: activeUsersCount.toString() },
+        { name: "Requests Sent", value: sentRequestsCount.toString() }
+      )
+      .setColor("#00AAFF")
+      .setTimestamp();
+
+    await interaction.editReply({
+      embeds: [requestEmbed],
+      ephemeral: true,
     });
+
+    activeRequests.add(interaction.user.id);
+    cooldowns.set(interaction.user.id, now + cooldownTime);
+
+    activeRequests.add(interaction.user.id);
 
     const requestState = {
       accepted: false,
@@ -104,17 +160,39 @@ module.exports = {
         const requester = await client.users.fetch(requesterId);
         const accepter = await client.users.fetch(requestState.acceptedUserId);
 
-        await requester.send(
-          `The other user's username is: ${accepter.tag} \n Now you can talk with each other by send requests`
-        );
-        await accepter.send(
-          `The other user's username is: ${requester.tag} \n Now you can talk with each other by send requests`
-        );
+        await requester.send(`The other user's username is: ${accepter.tag}`);
+        await accepter.send(`The other user's username is: ${requester.tag}`);
 
         await interaction.update({
-          content: `Usernames revealed! You can now communicate directly if you wish.`,
+          content: `Usernames revealed! The chat has ended.`,
           components: [],
         });
+
+        // Save match information to each user's history
+        const matchData = {
+          matchedUsername: accepter.tag,
+          interestName: interest.name,
+          matchDate: new Date().toISOString(),
+          additionalDetails: additionalDetails,
+        };
+
+        const requesterHistoryRef = discordUsersRef.child(
+          `${requesterId}/history`
+        );
+        await requesterHistoryRef.push(matchData);
+
+        const accepterMatchData = {
+          ...matchData,
+          matchedUsername: requester.tag,
+        };
+        const accepterHistoryRef = discordUsersRef.child(
+          `${requestState.acceptedUserId}/history`
+        );
+        await accepterHistoryRef.push(accepterMatchData);
+
+        // Stop forwarding messages
+        client.removeListener("messageCreate", messageHandler);
+        activeRequests.delete(interaction.user.id);
       } else {
         await interaction.update({
           content: "Waiting for the other user to reveal their username...",
@@ -324,9 +402,12 @@ module.exports = {
     });
 
     // Clean up event listeners after 24 hours
-    setTimeout(() => {
+    const cleanup = () => {
       client.removeListener("messageCreate", messageHandler);
-    }, 24 * 60 * 60 * 1000);
+      activeRequests.delete(requesterId);
+    };
+
+    setTimeout(cleanup, 24 * 60 * 60 * 1000);
   },
 
   name: "request",
