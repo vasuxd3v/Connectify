@@ -139,7 +139,6 @@ module.exports = {
   name: "report",
   description: "Report a user",
 };
-
 // Helper function to validate URL
 function isValidUrl(string) {
   try {
