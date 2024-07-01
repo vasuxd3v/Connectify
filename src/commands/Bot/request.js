@@ -1,11 +1,12 @@
 const {
   Client,
   Interaction,
+  ChannelType,
   ApplicationCommandOptionType,
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  ComponentType,
+  EmbedBuilder,
 } = require("discord.js");
 const { db } = require("../../index.js");
 const interests = require("../../tags.json");
@@ -18,49 +19,47 @@ module.exports = {
    */
   callback: async (client, interaction) => {
     const discordUsersRef = db.ref("discord-users");
-
     const targetInterestId = interaction.options.getString("interest");
     const additionalDetails = interaction.options.getString("additional");
     const interest = interests.find((i) => i.id === targetInterestId);
 
     if (!interest) {
       await interaction.reply({
-        content: "Invalid interest provided.",
+        content: "❌ Invalid interest provided.",
         ephemeral: true,
       });
       return;
     }
 
-    const requestId = interaction.id; // Unique ID for the request
-    const requesterId = interaction.user.id; // ID of the user who made the request
+    const requestId = interaction.id;
+    const requesterId = interaction.user.id;
 
     await interaction.reply({
-      content: `Interest: ${interest.name}`,
+      content: `🚀 Your request for interest: ${interest.name} has been sent. Waiting for responses...`,
       ephemeral: true,
     });
 
-    // Fetch all users from the database
     const snapshot = await discordUsersRef.once("value");
     const users = snapshot.val() || {};
 
-    // Filter users based on interest and status
     const matchingUsers = Object.keys(users).filter((userId) => {
       const user = users[userId];
-
-      if (user.status !== "enabled" || !user.tags) {
-        return false;
-      }
-
-      const userTags = Object.keys(user.tags);
-      return userTags.includes(interest.name);
+      return (
+        userId !== requesterId &&
+        user.status === "enabled" &&
+        user.tags &&
+        user.tags[interest.name]
+      );
     });
 
-    // Store request state
     const requestState = {
       accepted: false,
+      acceptedUserId: null,
+      chatStarted: false,
+      revealUsernameClicks: new Set(),
+      startChatClicks: new Set(),
     };
 
-    // Send DM to each matching user
     const buttons = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(`accept_${requestId}`)
@@ -77,8 +76,18 @@ module.exports = {
     for (const userId of matchingUsers) {
       try {
         const user = await client.users.fetch(userId);
+        const requesterBio = users[requesterId].bio || "No bio provided";
+
+        const matchEmbed = new EmbedBuilder()
+          .setTitle("Anonymous Match Request")
+          .setDescription(`Interest: ${interest.name}`)
+          .addFields(
+            { name: "Requester's Bio", value: requesterBio },
+            { name: "Additional Details", value: additionalDetails }
+          );
+
         const message = await user.send({
-          content: `You have a new request matching your interest (${interest.name}): ${additionalDetails}`,
+          embeds: [matchEmbed],
           components: [buttons],
         });
         messages[userId] = message;
@@ -87,7 +96,160 @@ module.exports = {
       }
     }
 
-    // Event listener for button interactions
+    const handleRevealUsername = async (interaction) => {
+      const userId = interaction.user.id;
+      requestState.revealUsernameClicks.add(userId);
+
+      if (requestState.revealUsernameClicks.size === 2) {
+        const requester = await client.users.fetch(requesterId);
+        const accepter = await client.users.fetch(requestState.acceptedUserId);
+
+        await requester.send(
+          `The other user's username is: ${accepter.tag} \n Now you can talk with each other by send requests`
+        );
+        await accepter.send(
+          `The other user's username is: ${requester.tag} \n Now you can talk with each other by send requests`
+        );
+
+        await interaction.update({
+          content: `Usernames revealed! You can now communicate directly if you wish.`,
+          components: [],
+        });
+      } else {
+        await interaction.update({
+          content: "Waiting for the other user to reveal their username...",
+          components: [
+            new ActionRowBuilder().addComponents(
+              new ButtonBuilder()
+                .setCustomId(`reveal_${requestId}`)
+                .setLabel("Reveal Username")
+                .setStyle(ButtonStyle.Primary)
+                .setDisabled(true)
+            ),
+          ],
+        });
+      }
+    };
+
+    // Add this function to create a typing indicator
+    const simulateTyping = async (user) => {
+      try {
+        const channel = await user.createDM();
+        await channel.sendTyping();
+      } catch (error) {
+        console.error(`❌ Failed to simulate typing: ${error.message}`);
+      }
+    };
+
+    // Modify handleStartChat to include typing indicator
+    const handleStartChat = async (interaction) => {
+      const userId = interaction.user.id;
+      requestState.startChatClicks.add(userId);
+
+      if (requestState.startChatClicks.size === 2) {
+        requestState.chatStarted = true;
+        const requester = await client.users.fetch(requesterId);
+        const accepter = await client.users.fetch(requestState.acceptedUserId);
+
+        const revealButton = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`reveal_${requestId}`)
+            .setLabel("👀 Reveal Username")
+            .setStyle(ButtonStyle.Primary)
+        );
+
+        await simulateTyping(requester);
+        await simulateTyping(accepter);
+
+        setTimeout(async () => {
+          await requester.send({
+            content:
+              "🎉 Chat started! You can now communicate through bot DMs. Use `.s` to send messages to accepter",
+            components: [revealButton],
+          });
+          await accepter.send({
+            content:
+              "🎉 Chat started! You can now communicate through bot DMs. Use `.s` to send messages to requester",
+            components: [revealButton],
+          });
+        }, 2000);
+
+        await interaction.update({
+          content: "🚀 Chat started! You can now communicate through bot DMs.",
+          components: [],
+        });
+      } else {
+        await interaction.update({
+          content: "⏳ Waiting for the other user to start the chat...",
+          components: [
+            new ActionRowBuilder().addComponents(
+              new ButtonBuilder()
+                .setCustomId(`startchat_${requestId}`)
+                .setLabel("Start Chat")
+                .setStyle(ButtonStyle.Success)
+                .setDisabled(true)
+            ),
+          ],
+        });
+      }
+    };
+
+    const forwardMessage = async (message) => {
+      if (!requestState.chatStarted) {
+        return;
+      }
+
+      const isRequester = message.author.id === requesterId;
+      const recipientId = isRequester
+        ? requestState.acceptedUserId
+        : requesterId;
+
+      try {
+        const recipient = await client.users.fetch(recipientId);
+
+        if (message.content.startsWith(".s")) {
+          const content = message.content.slice(2).trim();
+          const embed = new EmbedBuilder()
+            .setDescription(content)
+            .setColor(isRequester ? "#FF6B6B" : "#4ECDC4")
+            .setAuthor({
+              name: isRequester ? "✉️ From Requester" : "✉️ From Accepter",
+            })
+            .setFooter({ text: "connectify" })
+            .setTimestamp();
+
+          await recipient.send({ embeds: [embed] });
+        } else {
+          await recipient.send(`💬 Anonymous: ${message.content}`);
+        }
+      } catch (error) {
+        console.error(`❌ Failed to forward message: ${error.message}`);
+        message.author.send("❌ Failed to send message to your match.");
+      }
+    };
+
+    const messageHandler = (message) => {
+      if (message.author.bot) {
+        return;
+      }
+
+      // Check if the message is from a DM channel
+      if (message.channel.type !== ChannelType.DM) {
+        return;
+      }
+
+      if (
+        message.author.id !== requesterId &&
+        message.author.id !== requestState.acceptedUserId
+      ) {
+        console.log("Ignoring message from unrelated user");
+        return;
+      }
+      forwardMessage(message);
+    };
+
+    client.on("messageCreate", messageHandler);
+
     client.on("interactionCreate", async (interaction) => {
       if (!interaction.isButton()) return;
 
@@ -98,53 +260,43 @@ module.exports = {
       if (action === "accept") {
         if (!requestState.accepted) {
           requestState.accepted = true;
+          requestState.acceptedUserId = interaction.user.id;
 
-          // Disable buttons for the user who accepted
-          try {
-            const message = messages[interaction.user.id];
-            await message.edit({
-              components: [
-                new ActionRowBuilder().addComponents(
-                  new ButtonBuilder()
-                    .setCustomId(`accept_${reqId}`)
-                    .setLabel("Accept")
-                    .setStyle(ButtonStyle.Success)
-                    .setDisabled(true),
-                  new ButtonBuilder()
-                    .setCustomId(`deny_${reqId}`)
-                    .setLabel("Deny")
-                    .setStyle(ButtonStyle.Danger)
-                    .setDisabled(true)
-                ),
-              ],
-            });
-          } catch (error) {
-            console.error(
-              `Failed to update DM to user ${interaction.user.id}: ${error.message}`
-            );
-          }
+          const requesterBio = users[requesterId].bio || "No bio provided";
+          const accepterBio =
+            users[interaction.user.id].bio || "No bio provided";
 
-          // Disable buttons for all other users
+          const startChatButton = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId(`startchat_${requestId}`)
+              .setLabel("Start Chat")
+              .setStyle(ButtonStyle.Success)
+          );
+
+          // Send bio and start chat button to accepter
+          await interaction.update({
+            content: "You accepted the request. Here's the requester's bio:",
+            embeds: [new EmbedBuilder().setDescription(requesterBio)],
+            components: [startChatButton],
+          });
+
+          // Send bio and start chat button to requester
+          const requester = await client.users.fetch(requesterId);
+          await requester.send({
+            content:
+              "Your request has been accepted. Here's the accepter's bio:",
+            embeds: [new EmbedBuilder().setDescription(accepterBio)],
+            components: [startChatButton],
+          });
+
+          // Update messages for other users
           for (const userId of matchingUsers) {
             if (userId !== interaction.user.id) {
               try {
                 const message = messages[userId];
                 await message.edit({
-                  content: "Request accepted by other user.",
-                  components: [
-                    new ActionRowBuilder().addComponents(
-                      new ButtonBuilder()
-                        .setCustomId(`accept_${reqId}`)
-                        .setLabel("Accept")
-                        .setStyle(ButtonStyle.Success)
-                        .setDisabled(true),
-                      new ButtonBuilder()
-                        .setCustomId(`deny_${reqId}`)
-                        .setLabel("Deny")
-                        .setStyle(ButtonStyle.Danger)
-                        .setDisabled(true)
-                    ),
-                  ],
+                  content: "Request accepted by another user.",
+                  components: [],
                 });
               } catch (error) {
                 console.error(
@@ -153,22 +305,6 @@ module.exports = {
               }
             }
           }
-
-          // Notify the original requester
-          try {
-            const requester = await client.users.fetch(requesterId);
-            await requester.send("Your request has been accepted.");
-          } catch (error) {
-            console.error(
-              `Failed to notify requester ${requesterId}: ${error.message}`
-            );
-          }
-
-          // Respond to the user who accepted
-          await interaction.reply({
-            content:
-              "You are now connected to requesters and can communicate further through bot dm's.",
-          });
         } else {
           await interaction.reply({
             content: "Request already accepted.",
@@ -176,33 +312,21 @@ module.exports = {
           });
         }
       } else if (action === "deny") {
-        try {
-          const message = messages[interaction.user.id];
-          await message.edit({
-            components: [
-              new ActionRowBuilder().addComponents(
-                new ButtonBuilder()
-                  .setCustomId(`accept_${reqId}`)
-                  .setLabel("Accept")
-                  .setStyle(ButtonStyle.Success)
-                  .setDisabled(true),
-                new ButtonBuilder()
-                  .setCustomId(`deny_${reqId}`)
-                  .setLabel("Deny")
-                  .setStyle(ButtonStyle.Danger)
-                  .setDisabled(true)
-              ),
-            ],
-          });
-        } catch (error) {
-          console.error(
-            `Failed to update DM to user ${interaction.user.id}: ${error.message}`
-          );
-        }
-
-        await interaction.reply({ content: "Request denied", ephemeral: true });
+        await interaction.update({
+          content: "Request denied",
+          components: [],
+        });
+      } else if (action === "reveal") {
+        await handleRevealUsername(interaction);
+      } else if (action === "startchat") {
+        await handleStartChat(interaction);
       }
     });
+
+    // Clean up event listeners after 24 hours
+    setTimeout(() => {
+      client.removeListener("messageCreate", messageHandler);
+    }, 24 * 60 * 60 * 1000);
   },
 
   name: "request",

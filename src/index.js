@@ -3,6 +3,7 @@ Firebase Realtime Database. Here's a breakdown of what each part of the code is 
 const { Client, IntentsBitField } = require("discord.js");
 const eventHandler = require("./handlers/eventHandler");
 require("dotenv").config();
+// const ora = require("ora"); // For terminal spinner
 
 const client = new Client({
   intents: [
@@ -10,6 +11,7 @@ const client = new Client({
     IntentsBitField.Flags.GuildMembers,
     IntentsBitField.Flags.GuildMessages,
     IntentsBitField.Flags.MessageContent,
+    IntentsBitField.Flags.DirectMessages,
   ],
 });
 
