@@ -22,7 +22,7 @@ module.exports = {
    */
   callback: async (client, interaction) => {
     // Implement cooldown
-    const cooldownTime = 5 * 60 * 1000; // 5 minutes in milliseconds
+    const cooldownTime = 10 * 60 * 1000; // 5 minutes in milliseconds
     const now = Date.now();
     const cooldownEnd = cooldowns.get(interaction.user.id) || 0;
 

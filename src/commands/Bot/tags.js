@@ -6,6 +6,9 @@ const {
   ComponentType,
   ActionRowBuilder,
   ApplicationCommandOptionType,
+  EmbedBuilder,
+  ButtonBuilder,
+  ButtonStyle,
 } = require("discord.js");
 const { db } = require("../../index.js");
 
@@ -148,14 +151,16 @@ module.exports = {
       return new ActionRowBuilder().addComponents(selectMenu);
     });
 
-    if (interaction.options.getString("config") === "clear-tags") {
+    const config = interaction.options.getString("config");
+
+    if (config === "clear-tags") {
       // Clear all tags for the user
       await discordUsersRef.child(userId).child("interest").remove();
       await interaction.reply({
         content: "All your tags have been cleared.",
         ephemeral: true,
       });
-    } else {
+    } else if (config === "set-tags") {
       // Display set-tags menu and allow user to update interests
       interaction.reply({
         components: actionRows,
@@ -195,15 +200,99 @@ module.exports = {
           });
         }
       });
+    } else if (config === "info") {
+      // Create buttons for each category
+      const categoryButtons = Object.keys(categories).map((category) =>
+        new ButtonBuilder()
+          .setCustomId(`info_${category}`)
+          .setLabel(category.charAt(0).toUpperCase() + category.slice(1))
+          .setStyle(ButtonStyle.Primary)
+      );
+
+      const buttonRow = new ActionRowBuilder().addComponents(categoryButtons);
+
+      await interaction.reply({
+        content: "Select a category to view tag information:",
+        components: [buttonRow],
+        ephemeral: true,
+      });
+
+      const filter = (i) => i.user.id === interaction.user.id;
+      const collector = interaction.channel.createMessageComponentCollector({
+        filter,
+        time: 60000,
+      });
+
+      collector.on("collect", async (i) => {
+        const selectedCategory = i.customId.split("_")[1];
+
+        // Fetch tag information
+        const snapshot = await discordUsersRef.once("value");
+        const users = snapshot.val();
+
+        const tagCounts = {};
+        const activeTagCounts = {};
+
+        Object.entries(users).forEach(([userId, user]) => {
+          if (user.tags) {
+            Object.keys(user.tags).forEach((tag) => {
+              if (
+                categories[selectedCategory].some((item) => item.value === tag)
+              ) {
+                tagCounts[tag] = (tagCounts[tag] || 0) + 1;
+                const member = interaction.guild.members.cache.get(userId);
+                if (
+                  member &&
+                  member.presence &&
+                  member.presence.status !== "offline"
+                ) {
+                  activeTagCounts[tag] = (activeTagCounts[tag] || 0) + 1;
+                }
+              }
+            });
+          }
+        });
+
+        const embed = new EmbedBuilder()
+          .setColor("#0099ff")
+          .setTitle(
+            `${
+              selectedCategory.charAt(0).toUpperCase() +
+              selectedCategory.slice(1)
+            } Tag Information`
+          )
+          .setDescription(
+            `Here's the current status of ${selectedCategory} tags:`
+          );
+
+        categories[selectedCategory].forEach(({ value }) => {
+          const count = tagCounts[value] || 0;
+          const activeCount = activeTagCounts[value] || 0;
+          embed.addFields({
+            name: value,
+            value: `Total: ${count} users | Active: ${activeCount} users`,
+            inline: true,
+          });
+        });
+
+        await i.update({ embeds: [embed], components: [buttonRow] });
+      });
+
+      collector.on("end", () => {
+        interaction.editReply({
+          content: "Tag information session ended.",
+          components: [],
+        });
+      });
     }
   },
 
   name: "tags",
-  description: "Tags Configuration",
+  description: "Tags Configuration and Information",
   options: [
     {
       name: "config",
-      description: "Set or Clear tags.",
+      description: "Set, Clear, or Get Info about tags.",
       type: ApplicationCommandOptionType.String,
       choices: [
         {
@@ -215,6 +304,11 @@ module.exports = {
           name: "clear-tags",
           description: "Clear all tags.",
           value: "clear-tags",
+        },
+        {
+          name: "info",
+          description: "Get information about tag usage.",
+          value: "info",
         },
       ],
       required: true,
