@@ -105,12 +105,12 @@ module.exports = {
             {
               name: "Chatting",
               value:
-                "You can chat with the accepter through bot DMs. Use `s.` as a prefix for your messages.",
+                "You can chat with the accepter through bot DMs. Use `.s` as a prefix for your messages.",
             },
             {
               name: "Revealing usernames",
               value:
-                "When both parties agree, you can click the `**Reveal Username**` button to continue communication outside the bot.",
+                "When both parties agree, you can click the **`Reveal Username`** button to continue communication outside the bot.",
             }
           )
           .setFooter({
@@ -128,7 +128,7 @@ module.exports = {
             {
               name: "Step 1",
               value:
-                "Use `/set-bio` command and enter your name and about /n **caution**: (don't enter your `Discord username`). You can see your bio by using `/bio` command.",
+                "Use `/set-bio` command and enter your name and about \n **caution**: (don't enter your `Discord username`). You can see your bio by using `/bio` command.",
             },
             {
               name: "Step 2",
